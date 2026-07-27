@@ -380,7 +380,7 @@ Potential future enhancements include:
 
 **Aima Imtiaz**
 
-Final Year Project
+Final Project
 
 ---
 
