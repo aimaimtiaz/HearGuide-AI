@@ -1,7 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
-
-const API_KEY = import.meta.env.VITE_GEMINI_API_KEY as string | undefined;
-
 export const SYSTEM_INSTRUCTION = `You are HearGuide AI, an educational hearing health assistant.
 
 Explain hearing symptoms, hearing tests, hearing protection, tinnitus, hearing loss, ear infections, earwax, hearing aids, and hearing health using clear, simple, compassionate language.
@@ -29,73 +25,7 @@ export const SYMPTOM_FORMAT_INSTRUCTION = `When responding to a symptom check, s
 ## Hearing Protection Advice
 ## Medical Disclaimer`;
 
-const MODEL_CANDIDATES = ['gemini-flash-latest', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'];
-
-let client: GoogleGenAI | null = null;
-function getClient(): GoogleGenAI {
-  if (!API_KEY) {
-    throw new Error('Gemini API key is not configured. Set VITE_GEMINI_API_KEY in your environment.');
-  }
-  if (!client) client = new GoogleGenAI({ apiKey: API_KEY });
-  return client;
-}
-
-let workingModel: string | null = null;
-
-async function tryGenerate(model: string, contents: string, systemInstruction: string): Promise<string> {
-  const genai = getClient();
-  const response = await genai.models.generateContent({
-    model,
-    contents,
-    config: { systemInstruction },
-  });
-  const text = response.text;
-  if (!text) throw new Error('No response text returned by the model.');
-  return text;
-}
-
-function isUnavailable(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  // 429 = rate limited (model exists, try again); 404 = model not found (skip it)
-  return msg.includes('404') || msg.includes('NOT_FOUND') || msg.includes('is not found');
-}
-
-async function generate(contents: string, systemInstruction: string): Promise<string> {
-  const models = workingModel ? [workingModel, ...MODEL_CANDIDATES.filter((m) => m !== workingModel)] : MODEL_CANDIDATES;
-  for (const model of models) {
-    try {
-      const text = await tryGenerate(model, contents, systemInstruction);
-      workingModel = model;
-      return text;
-    } catch (err) {
-      console.error(`[HearGuide AI] Model "${model}" failed:`, err);
-      // If it's a rate limit (429), this model works—retry it once before moving on.
-      if (err instanceof Error && err.message.includes('429')) {
-        try {
-          const text = await tryGenerate(model, contents, systemInstruction);
-          workingModel = model;
-          return text;
-        } catch (retryErr) {
-          console.error(`[HearGuide AI] Model "${model}" retry failed:`, retryErr);
-        }
-      }
-      // If the model is unavailable (404), fall through to the next candidate.
-      if (isUnavailable(err)) continue;
-    }
-  }
-  throw new Error(
-    'Could not reach any Gemini model right now. Please check your API key and try again in a moment.',
-  );
-}
-
 export type ChatMessage = { role: 'user' | 'model'; text: string };
-
-export async function generateChatReply(history: ChatMessage[], userMessage: string): Promise<string> {
-  const contents = [...history, { role: 'user', text: userMessage }]
-    .map((m) => `${m.role === 'user' ? 'User' : 'HearGuide AI'}: ${m.text}`)
-    .join('\n\n');
-  return generate(contents, SYSTEM_INSTRUCTION);
-}
 
 export interface SymptomInput {
   age: string;
@@ -104,6 +34,48 @@ export interface SymptomInput {
   ear: string;
   severity: string;
   notes: string;
+}
+
+async function callGemini(payload: {
+  contents: string;
+  systemInstruction: string;
+}): Promise<string> {
+  const response = await fetch('/api/gemini', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  let data: { text?: string; error?: string } = {};
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('The AI service returned an invalid response.');
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || 'The AI service is unavailable right now. Please try again.');
+  }
+
+  if (!data.text) {
+    throw new Error('No response was returned by the AI service.');
+  }
+
+  return data.text;
+}
+
+export async function generateChatReply(
+  history: ChatMessage[],
+  userMessage: string,
+): Promise<string> {
+  const contents = [...history, { role: 'user', text: userMessage }]
+    .map((m) => `${m.role === 'user' ? 'User' : 'HearGuide AI'}: ${m.text}`)
+    .join('\n\n');
+
+  return callGemini({
+    contents,
+    systemInstruction: SYSTEM_INSTRUCTION,
+  });
 }
 
 export async function analyzeSymptoms(input: SymptomInput): Promise<string> {
@@ -116,9 +88,16 @@ Affected ear(s): ${input.ear}
 Severity of concern: ${input.severity}
 Additional notes: ${input.notes || 'none'}`;
 
-  return generate(prompt, `${SYSTEM_INSTRUCTION}\n\n${SYMPTOM_FORMAT_INSTRUCTION}`);
+  return callGemini({
+    contents: prompt,
+    systemInstruction: `${SYSTEM_INSTRUCTION}\n\n${SYMPTOM_FORMAT_INSTRUCTION}`,
+  });
 }
 
+/**
+ * The Gemini key is intentionally not exposed to the browser.
+ * Configuration is checked by the server-side /api/gemini function.
+ */
 export function isGeminiConfigured(): boolean {
-  return Boolean(API_KEY);
+  return true;
 }
