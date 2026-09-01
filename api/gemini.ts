@@ -2,23 +2,27 @@
 // The Gemini API key is read only from the server environment and is never
 // sent to the browser.
 
-type Request = {
-  method?: string;
-  body?: {
-    contents?: unknown;
-    systemInstruction?: unknown;
-  };
+import { GoogleGenAI } from '@google/genai';
+
+const MODEL = 'gemini-3.7-flash';
+
+type Body = {
+  contents?: unknown;
+  systemInstruction?: unknown;
 };
 
-type Response = {
-  status: (code: number) => Response;
+type VercelRequest = {
+  method?: string;
+  body?: Body;
+};
+
+type VercelResponse = {
+  status: (code: number) => VercelResponse;
   json: (body: unknown) => void;
   setHeader: (name: string, value: string) => void;
 };
 
-const MODEL = 'gemini-2.5-flash';
-
-export default async function handler(req: Request, res: Response) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Cache-Control', 'no-store');
 
   if (req.method === 'OPTIONS') {
@@ -31,8 +35,7 @@ export default async function handler(req: Request, res: Response) {
     return res.status(405).json({ error: 'Method not allowed.' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     console.error('[HearGuide AI] GEMINI_API_KEY is missing.');
     return res.status(500).json({
@@ -52,45 +55,18 @@ export default async function handler(req: Request, res: Response) {
   }
 
   try {
-    const endpoint =
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+    const ai = new GoogleGenAI({ apiKey });
 
-    const geminiResponse = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
+    const interaction = await ai.interactions.create({
+      model: MODEL,
+      input: contents,
+      system_instruction: systemInstruction,
+      generation_config: {
+        temperature: 0.4,
       },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: systemInstruction }],
-        },
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: contents }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.4,
-        },
-      }),
     });
 
-    const data = await geminiResponse.json();
-
-    if (!geminiResponse.ok) {
-      // Keep the API key and other sensitive details out of the client response.
-      console.error('[HearGuide AI] Gemini API error:', geminiResponse.status, data?.error?.message || 'Unknown error');
-      return res.status(502).json({
-        error: 'The AI service could not process the request right now. Please try again in a moment.',
-      });
-    }
-
-    const text = data?.candidates?.[0]?.content?.parts
-      ?.map((part: { text?: string }) => part.text || '')
-      .join('')
-      .trim();
+    const text = interaction.output_text?.trim();
 
     if (!text) {
       console.error('[HearGuide AI] Gemini returned no text.');
@@ -100,10 +76,12 @@ export default async function handler(req: Request, res: Response) {
     }
 
     return res.status(200).json({ text });
-  } catch (err) {
-    console.error('[HearGuide AI] Server request failed:', err);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[HearGuide AI] Gemini request failed:', message);
+
     return res.status(502).json({
-      error: 'Could not reach the AI service right now. Please try again in a moment.',
+      error: 'The AI service could not process the request right now. Please try again in a moment.',
     });
   }
 }
